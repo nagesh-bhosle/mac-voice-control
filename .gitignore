@@ -9,3 +9,7 @@ __pycache__/
 dist/
 *.egg-info/
 whisper-models/
+
+# Runtime from ./start.sh
+.mac-voice.pid
+.mac-voice.log

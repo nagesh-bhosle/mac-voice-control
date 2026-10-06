@@ -77,6 +77,40 @@ with `Authorization: Bearer $COMMAND_CODE_API_KEY`.
 
 Secrets live in `.env` only and are never logged or committed.
 
+
+## Start / stop (daemon)
+
+On a Mac, after setup and permissions:
+
+```sh
+./start.sh    # prompts for missing keys, uv sync, hold-mode in background
+./stop.sh     # graceful stop
+```
+
+`start.sh` will:
+
+1. Load `.env` if present (creates it from `.env.example` when missing).
+2. Interactively prompt (input hidden) for empty keys:
+   - `DEEPGRAM_API_KEY` — Enter skips (Whisper / `--text` still work)
+   - `COMMAND_CODE_API_KEY` — Enter skips (no Muse / `--use-llm`)
+   - `TYPESAFE_API_KEY` — Enter skips (local router is default)
+3. Write any new keys into `.env` with `chmod 600` (never printed or committed).
+4. Run `uv sync` if needed, then start hold-to-talk in the background
+   (`uv run python -m mac_voice --hold`, looped so it keeps listening).
+5. Write PID to `.mac-voice.pid` and logs to `.mac-voice.log`.
+6. If already running, print the pid and exit 0.
+
+If `MAC_VOICE_USE_LLM=1` is set in `.env`, the daemon also passes `--use-llm`.
+
+```sh
+tail -f .mac-voice.log   # watch activity
+./stop.sh                # SIGTERM then SIGKILL if needed
+```
+
+Listening modes only work on macOS. On Linux, `./start.sh` still prompts for
+keys and prepares `.env`, then exits 0 with a hint to use `--text` /
+`--dry-run` for routing tests.
+
 ## Usage
 
 Dry-run routes the utterance and prints the plan without touching AX:
