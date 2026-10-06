@@ -1,0 +1,52 @@
+[
+  {
+    "utterance": "open chrome",
+    "actions": [
+      {"action": "open_app", "args": {"app": "chrome"}}
+    ]
+  },
+  {
+    "utterance": "open rancher",
+    "actions": [
+      {"action": "open_app", "args": {"app": "rancher"}}
+    ]
+  },
+  {
+    "utterance": "go to vs code",
+    "actions": [
+      {"action": "focus_editor", "args": {"app": "vscode"}}
+    ]
+  },
+  {
+    "utterance": "open chrome and open facebook in a tab",
+    "actions": [
+      {"action": "open_app", "args": {"app": "chrome"}},
+      {"action": "open_url", "args": {"site": "facebook", "new_tab": true}}
+    ]
+  },
+  {
+    "utterance": "undo",
+    "actions": [
+      {"action": "editor_command", "args": {"command": "undo"}}
+    ]
+  },
+  {
+    "utterance": "save",
+    "actions": [
+      {"action": "editor_command", "args": {"command": "save"}}
+    ]
+  },
+  {
+    "utterance": "new line",
+    "actions": [
+      {"action": "editor_command", "args": {"command": "new_line"}}
+    ]
+  },
+  {
+    "utterance": "in intellij type public static void main",
+    "actions": [
+      {"action": "focus_editor", "args": {"app": "intellij"}},
+      {"action": "dictate", "args": {"text": "public static void main"}}
+    ]
+  }
+]
