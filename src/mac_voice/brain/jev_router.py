@@ -1,11 +1,15 @@
-"""Jev router: local heuristic routing (always offline) plus optional TypeSafe Jev API
-and optional Command Code LLM routing constrained to the closed action catalog.
+"""Jev router: local heuristic routing (always offline) plus optional Command Code
+Jev (typesafe/jev via Provider API systemone) and optional Command Code LLM
+routing constrained to the closed action catalog.
 
-The local router is the primary path for --dry-run and tests. When
-TYPESAFE_API_KEY is set and --use-jev is passed, the router calls the
-TypeSafe Jev API. When --use-llm (or MAC_VOICE_USE_LLM) and a Command Code
-key are set, the router asks the LLM for a JSON ActionPlan, validates it
-against brain/candidates.py, and falls back to the local heuristic on failure.
+The local router is the primary path for --dry-run and tests. When --use-jev
+is passed and COMMAND_CODE_API_KEY (or CMD_API_KEY) is set, the router calls
+Command Code Jev at /provider/v1/systemone with model typesafe/jev. When
+--use-llm (or MAC_VOICE_USE_LLM) and a Command Code key are set, the router
+asks a chat model for a JSON ActionPlan, validates it against
+brain/candidates.py, and falls back to the local heuristic on failure.
+
+TYPESAFE_API_KEY is legacy/optional and is not required for --use-jev.
 
 The closed action set in brain/candidates.py is the only source of
 actions. Model output is never executed as shell.
@@ -16,14 +20,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import httpx
 from pydantic import BaseModel, Field
 
 from mac_voice.brain import candidates as C
 from mac_voice.brain.slots import SlotExtractor
-from mac_voice.config import Settings
-
-JEV_API_URL = "https://api.typesafe.ai/v1/jev/route"
+from mac_voice.config import JEV_MODEL, Settings
 
 _slots = SlotExtractor()
 
@@ -231,7 +232,34 @@ def route_local(utterance: str) -> ActionPlan:
     return ActionPlan(utterance=utterance, actions=actions, via="local")
 
 
+_ACTION_LABELS: dict[str, str] = {
+    "open_app": "Open or launch an application",
+    "activate_app": "Bring an already-running app to the front",
+    "quit_app": "Quit an application",
+    "new_window": "Open a new window",
+    "close_window": "Close the front window",
+    "minimize": "Minimize the front window",
+    "fullscreen": "Toggle fullscreen",
+    "open_url": "Open a website or URL in the browser",
+    "new_tab": "Open a new browser tab",
+    "close_tab": "Close the current browser tab",
+    "next_tab": "Switch to the next browser tab",
+    "prev_tab": "Switch to the previous browser tab",
+    "search_web": "Search the web for a query",
+    "focus_editor": "Focus an IDE / code editor",
+    "dictate": "Type spoken text at the caret",
+    "editor_command": "Run an IDE shortcut (undo, save, etc.)",
+    "code_snippet": "Insert a closed code snippet template",
+    "volume_up": "Increase system volume",
+    "volume_down": "Decrease system volume",
+    "mute": "Mute or unmute",
+    "screenshot": "Capture the screen",
+    "say": "Speak text aloud with macOS say",
+}
+
+
 def build_choice_questions(utterance: str) -> list[dict[str, Any]]:
+    """Legacy list shape kept for tests/docs; prefer build_jev_questions."""
     parts = _slots.split_compound(utterance)
     questions: list[dict[str, Any]] = []
     for part in parts:
@@ -260,32 +288,246 @@ def build_choice_questions(utterance: str) -> list[dict[str, Any]]:
     return questions
 
 
+def build_jev_questions(utterance: str) -> tuple[list[str], dict[str, Any]]:
+    """Build Command Code systemone questions for typesafe/jev.
+
+    Returns (parts, questions) where questions maps name -> {type, instructions, criteria}.
+    """
+    parts = _slots.split_compound(utterance) or [utterance.strip() or utterance]
+    questions: dict[str, Any] = {}
+    for i, part in enumerate(parts):
+        questions[f"action_{i}"] = {
+            "type": "choice",
+            "instructions": (
+                "Which closed Mac voice-control action best matches this command part? "
+                f"Command: {part!r}"
+            ),
+            "criteria": {a: _ACTION_LABELS.get(a, a) for a in C.ACTIONS},
+        }
+        questions[f"app_{i}"] = {
+            "type": "choice",
+            "instructions": (
+                "Which application is named in this command part? "
+                f"Choose none if no app is named. Command: {part!r}"
+            ),
+            "criteria": {
+                **{k: v["process"] for k, v in C.APPS.items()},
+                "none": "No application is named",
+            },
+        }
+        questions[f"site_{i}"] = {
+            "type": "choice",
+            "instructions": (
+                "Which website is named in this command part? "
+                f"Choose none if no site is named. Command: {part!r}"
+            ),
+            "criteria": {
+                **{k: v["url"] for k, v in C.SITES.items()},
+                "none": "No website is named",
+            },
+        }
+        if re.search(
+            r"\b(undo|redo|save|new line|delete line|select word|select line|"
+            r"go to line|format|comment|find|replace|run|debug|copy|paste|cut)\b",
+            part,
+            re.IGNORECASE,
+        ):
+            questions[f"editor_{i}"] = {
+                "type": "choice",
+                "instructions": (
+                    "Which editor shortcut command is requested? "
+                    f"Choose none if none. Command: {part!r}"
+                ),
+                "criteria": {
+                    **{k: " / ".join(v["phrases"]) for k, v in C.EDITOR_COMMANDS.items()},
+                    "none": "No editor command",
+                },
+            }
+        if re.search(r"\b(snippet|template|insert)\b", part, re.IGNORECASE):
+            questions[f"snippet_{i}"] = {
+                "type": "choice",
+                "instructions": (
+                    "Which code snippet template is requested? "
+                    f"Choose none if none. Command: {part!r}"
+                ),
+                "criteria": {
+                    **{k: v for k, v in C.SNIPPETS.items()},
+                    "none": "No snippet",
+                },
+            }
+    return parts, questions
+
+
+def _choice_id(answer: Any) -> str | None:
+    if not isinstance(answer, dict):
+        return None
+    choice = answer.get("choice")
+    if isinstance(choice, str) and choice and choice != "none":
+        return choice
+    return None
+
+
+def _args_for_jev_action(
+    action: str,
+    part: str,
+    app: str | None,
+    site: str | None,
+    editor_cmd: str | None,
+    snippet: str | None,
+) -> dict[str, Any]:
+    """Fill closed-catalog args from Jev choices + local slot extraction."""
+    text = _slots.normalize(part)
+    args: dict[str, Any] = {}
+    if action in {"open_app", "activate_app", "quit_app", "focus_editor"}:
+        resolved = app or _slots.extract_app(text)
+        if resolved and resolved in C.APPS:
+            args["app"] = resolved
+    elif action == "new_window":
+        resolved = app or _slots.extract_app(text)
+        if resolved and resolved in C.APPS:
+            args["app"] = resolved
+    elif action == "open_url":
+        resolved_site = site or _slots.extract_site(text)
+        url = _slots.extract_url(part)
+        if resolved_site and resolved_site in C.SITES:
+            args["site"] = resolved_site
+            args["url"] = C.SITES[resolved_site]["url"]
+        elif url:
+            args["site"] = "url"
+            args["url"] = url if url.startswith("http") else f"https://{url}"
+        if re.search(r"\btab\b", text):
+            args["new_tab"] = True
+    elif action == "search_web":
+        m = _SEARCH_RE.search(part.strip())
+        query = m.group("q").strip() if m else ""
+        if not query:
+            # strip leading search verbs
+            query = re.sub(
+                r"^\s*(?:search(?:\s+for|\s+the\s+web\s+for)?|google|look up|look\s+up)\s+",
+                "",
+                part.strip(),
+                flags=re.IGNORECASE,
+            ).strip()
+        if query:
+            args["query"] = query
+    elif action == "dictate":
+        dictate_text = _slots.extract_dictate_text(part) or part.strip()
+        args["text"] = dictate_text
+    elif action == "say":
+        m = _SAY_RE.match(part.strip())
+        args["text"] = m.group("text").strip() if m else part.strip()
+    elif action == "editor_command":
+        cmd = editor_cmd
+        if not cmd or cmd not in C.EDITOR_COMMANDS:
+            for ident, info in C.EDITOR_COMMANDS.items():
+                for phrase in info["phrases"]:
+                    if re.search(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", text):
+                        cmd = ident
+                        break
+                if cmd:
+                    break
+        if cmd and cmd in C.EDITOR_COMMANDS:
+            args["command"] = cmd
+        line_m = _GO_TO_LINE_RE.search(text)
+        if cmd == "go_to_line" and line_m:
+            args["line"] = int(line_m.group("n"))
+    elif action == "code_snippet":
+        name = snippet
+        if not name or name not in C.SNIPPETS:
+            snippet_m = _SNIPPET_RE.search(text)
+            if snippet_m:
+                name = snippet_m.group("name").replace(" ", "_")
+                if name == "if_else":
+                    name = "if_else"
+        if name and name in C.SNIPPETS:
+            args["name"] = name
+            args["template"] = C.SNIPPETS[name]
+    return args
+
+
+def plan_from_jev_answers(utterance: str, data: dict[str, Any], parts: list[str] | None = None) -> ActionPlan:
+    """Build an ActionPlan from a Command Code systemone / Jev answers payload."""
+    answers = data.get("answers") if isinstance(data.get("answers"), dict) else data
+    if not isinstance(answers, dict):
+        plan = route_local(utterance)
+        plan.via = "local-fallback(jev-no-answers)"
+        return plan
+    if parts is None:
+        parts = _slots.split_compound(utterance) or [utterance.strip() or utterance]
+    actions: list[Action] = []
+    for i, part in enumerate(parts):
+        action_name = _choice_id(answers.get(f"action_{i}"))
+        if not action_name or action_name not in C.ACTIONS:
+            # fall back to local for this part
+            actions.extend(_route_single(part))
+            continue
+        app = _choice_id(answers.get(f"app_{i}"))
+        site = _choice_id(answers.get(f"site_{i}"))
+        editor_cmd = _choice_id(answers.get(f"editor_{i}"))
+        snippet = _choice_id(answers.get(f"snippet_{i}"))
+        args = _args_for_jev_action(action_name, part, app, site, editor_cmd, snippet)
+        # Require minimal args; otherwise local for this part
+        if action_name in {"open_app", "activate_app", "quit_app", "focus_editor"} and "app" not in args:
+            actions.extend(_route_single(part))
+            continue
+        if action_name == "open_url" and "url" not in args and "site" not in args:
+            actions.extend(_route_single(part))
+            continue
+        if action_name == "search_web" and "query" not in args:
+            actions.extend(_route_single(part))
+            continue
+        if action_name == "editor_command" and "command" not in args:
+            actions.extend(_route_single(part))
+            continue
+        if action_name == "code_snippet" and "name" not in args:
+            actions.extend(_route_single(part))
+            continue
+        actions.append(
+            Action(
+                action=action_name,
+                args=args,
+                confirm=_confirm_for(action_name),
+                text=part.strip(),
+            )
+        )
+    if not actions:
+        plan = route_local(utterance)
+        plan.via = "local-fallback(jev-empty)"
+        return plan
+    return ActionPlan(utterance=utterance, actions=actions, via="jev")
+
+
 def route_via_jev(utterance: str, settings: Settings, timeout: float = 15.0) -> ActionPlan:
-    if not settings.typesafe_api_key:
-        raise RuntimeError("TYPESAFE_API_KEY is not set")
-    payload = {
-        "utterance": utterance,
-        "questions": build_choice_questions(utterance),
-        "actions": list(C.ACTIONS),
-    }
-    headers = {"Authorization": f"Bearer {settings.typesafe_api_key}"}
+    """Route via Command Code Jev (typesafe/jev). Falls back to local on missing key/errors."""
+    if not settings.command_code_api_key:
+        plan = route_local(utterance)
+        plan.via = "local-fallback(no-command-code-key)"
+        return plan
+    parts, questions = build_jev_questions(utterance)
+    state = {"utterance": utterance, "parts": parts}
     try:
-        resp = httpx.post(JEV_API_URL, json=payload, headers=headers, timeout=timeout)
-        resp.raise_for_status()
+        from mac_voice.llm.command_code import CommandCodeClient
+
+        client = CommandCodeClient(api_key=settings.command_code_api_key)
+        data = client.systemone(
+            state,
+            questions,
+            model=JEV_MODEL,
+            timeout=timeout,
+        )
     except Exception as exc:
         plan = route_local(utterance)
         plan.via = f"local-fallback({type(exc).__name__})"
         return plan
-    try:
-        data = resp.json()
-    except ValueError:
-        plan = route_local(utterance)
-        plan.via = "local-fallback(bad-json)"
-        return plan
-    return plan_from_jev_payload(utterance, data)
+    return plan_from_jev_answers(utterance, data, parts=parts)
 
 
 def plan_from_jev_payload(utterance: str, data: dict[str, Any]) -> ActionPlan:
+    """Accept systemone answers OR a legacy {actions:[...]} shape."""
+    if isinstance(data.get("answers"), dict) or any(
+        isinstance(k, str) and k.startswith("action_") for k in data
+    ):
+        return plan_from_jev_answers(utterance, data)
     raw_actions = data.get("actions") or data.get("plan") or []
     actions: list[Action] = []
     for item in raw_actions:
@@ -356,6 +598,6 @@ def route_utterance(
     settings = settings or Settings()
     if use_llm and settings.command_code_api_key:
         return route_via_llm(utterance, settings)
-    if use_jev and settings.typesafe_api_key:
+    if use_jev:
         return route_via_jev(utterance, settings)
     return route_local(utterance)

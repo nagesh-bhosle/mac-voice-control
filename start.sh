@@ -107,30 +107,30 @@ else
   echo "DEEPGRAM_API_KEY: already set"
 fi
 
+want_cc=0
+if [[ "${MAC_VOICE_USE_LLM:-0}" == "1" || "${MAC_VOICE_USE_JEV:-0}" == "1" ]]; then
+  want_cc=1
+fi
+
 if [[ -z "${COMMAND_CODE_API_KEY:-}" && -z "${CMD_API_KEY:-}" ]]; then
-  prompt_secret COMMAND_CODE_API_KEY "Paste Command Code key (COMMAND_CODE_API_KEY) or Enter to skip: "
+  if [[ "$want_cc" -eq 1 ]]; then
+    prompt_secret COMMAND_CODE_API_KEY "Paste Command Code key (needed for --use-llm / --use-jev) or Enter to skip: "
+  else
+    prompt_secret COMMAND_CODE_API_KEY "Paste Command Code key (COMMAND_CODE_API_KEY) for Muse/Jev, or Enter to skip: "
+  fi
   if [[ -n "${COMMAND_CODE_API_KEY:-}" ]]; then
     upsert_env COMMAND_CODE_API_KEY "$COMMAND_CODE_API_KEY"
     export COMMAND_CODE_API_KEY
     env_changed=1
   else
-    echo "Skipping Command Code (--use-llm / Muse routing disabled until set)." >&2
+    if [[ "$want_cc" -eq 1 ]]; then
+      echo "Warning: MAC_VOICE_USE_LLM/JEV is on but COMMAND_CODE_API_KEY is missing; local router will be used." >&2
+    else
+      echo "Skipping Command Code (local router default; --use-llm / --use-jev need this key)." >&2
+    fi
   fi
 else
   echo "COMMAND_CODE_API_KEY / CMD_API_KEY: already set"
-fi
-
-if [[ -z "${TYPESAFE_API_KEY:-}" ]]; then
-  prompt_secret TYPESAFE_API_KEY "Paste TypeSafe Jev key (TYPESAFE_API_KEY) or Enter to skip: "
-  if [[ -n "${TYPESAFE_API_KEY:-}" ]]; then
-    upsert_env TYPESAFE_API_KEY "$TYPESAFE_API_KEY"
-    export TYPESAFE_API_KEY
-    env_changed=1
-  else
-    echo "Skipping TypeSafe Jev (local router is the default)." >&2
-  fi
-else
-  echo "TYPESAFE_API_KEY: already set"
 fi
 
 if [[ "$env_changed" -eq 1 ]]; then
@@ -162,6 +162,9 @@ fi
 EXTRA_FLAGS=()
 if [[ "${MAC_VOICE_USE_LLM:-0}" == "1" ]]; then
   EXTRA_FLAGS+=(--use-llm)
+fi
+if [[ "${MAC_VOICE_USE_JEV:-0}" == "1" ]]; then
+  EXTRA_FLAGS+=(--use-jev)
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then

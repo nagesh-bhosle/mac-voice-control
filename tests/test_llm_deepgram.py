@@ -7,10 +7,16 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from mac_voice.brain.jev_router import plan_from_llm_payload, route_utterance
-from mac_voice.config import Settings, load_settings
+from mac_voice.brain.jev_router import (
+    plan_from_jev_answers,
+    plan_from_jev_payload,
+    plan_from_llm_payload,
+    route_utterance,
+)
+from mac_voice.config import JEV_MODEL, Settings, load_settings
 from mac_voice.llm.command_code import (
     COMMAND_CODE_CHAT_URL,
+    COMMAND_CODE_SYSTEMONE_URL,
     CommandCodeClient,
     CommandCodeError,
     parse_json_object,
@@ -201,3 +207,112 @@ def test_route_via_llm_mocked_http():
     assert plan.via == "llm"
     assert plan.actions[0].action == "open_app"
     assert plan.actions[0].args["app"] == "chrome"
+
+
+def test_route_use_jev_without_key_falls_back():
+    settings = Settings(command_code_api_key="")
+    plan = route_utterance("open chrome", settings, use_jev=True)
+    assert plan.via == "local-fallback(no-command-code-key)"
+    assert plan.actions[0].action == "open_app"
+    assert plan.actions[0].args["app"] == "chrome"
+
+
+def test_plan_from_jev_answers_open_app():
+    data = {
+        "model": JEV_MODEL,
+        "answers": {
+            "action_0": {"type": "choice", "choice": "open_app", "confidence": 0.9},
+            "app_0": {"type": "choice", "choice": "chrome", "confidence": 0.95},
+            "site_0": {"type": "choice", "choice": "none", "confidence": 0.8},
+        },
+    }
+    plan = plan_from_jev_answers("open chrome", data, parts=["open chrome"])
+    assert plan.via == "jev"
+    assert plan.actions[0].action == "open_app"
+    assert plan.actions[0].args["app"] == "chrome"
+
+
+def test_plan_from_jev_payload_legacy_actions():
+    plan = plan_from_jev_payload(
+        "mute",
+        {"actions": [{"action": "mute", "args": {}}]},
+    )
+    assert plan.via == "jev"
+    assert plan.actions[0].action == "mute"
+
+
+def test_command_code_systemone_url_and_headers():
+    client = CommandCodeClient(api_key="cc-jev-key")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {
+            "model": JEV_MODEL,
+            "answers": {
+                "action_0": {"type": "choice", "choice": "open_app", "confidence": 0.91},
+                "app_0": {"type": "choice", "choice": "chrome", "confidence": 0.88},
+                "site_0": {"type": "choice", "choice": "none", "confidence": 0.7},
+            },
+            "usage": {"input_tokens": 40, "output_tokens": 10},
+        }
+        return resp
+
+    with patch("mac_voice.llm.command_code.httpx.post", side_effect=fake_post):
+        data = client.systemone(
+            {"utterance": "open chrome", "parts": ["open chrome"]},
+            {
+                "action_0": {
+                    "type": "choice",
+                    "instructions": "Which action?",
+                    "criteria": {"open_app": "Open app", "mute": "Mute"},
+                }
+            },
+        )
+    assert captured["url"] == COMMAND_CODE_SYSTEMONE_URL
+    assert captured["headers"]["Authorization"] == "Bearer cc-jev-key"
+    assert captured["json"]["model"] == JEV_MODEL
+    assert "answers" in data
+
+
+def test_route_via_jev_mocked_http():
+    settings = Settings(command_code_api_key="cc-key")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        assert url == COMMAND_CODE_SYSTEMONE_URL
+        assert json["model"] == JEV_MODEL
+        assert "questions" in json
+        assert "action_0" in json["questions"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {
+            "model": JEV_MODEL,
+            "answers": {
+                "action_0": {"type": "choice", "choice": "open_app", "confidence": 0.9},
+                "app_0": {"type": "choice", "choice": "chrome", "confidence": 0.9},
+                "site_0": {"type": "choice", "choice": "none", "confidence": 0.8},
+            },
+        }
+        return resp
+
+    with patch("mac_voice.llm.command_code.httpx.post", side_effect=fake_post):
+        plan = route_utterance("open chrome", settings, use_jev=True)
+    assert plan.via == "jev"
+    assert plan.actions[0].action == "open_app"
+    assert plan.actions[0].args["app"] == "chrome"
+
+
+def test_route_via_jev_http_error_falls_back_local():
+    settings = Settings(command_code_api_key="cc-key")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        raise httpx.HTTPError("boom")
+
+    with patch("mac_voice.llm.command_code.httpx.post", side_effect=fake_post):
+        plan = route_utterance("open chrome", settings, use_jev=True)
+    assert plan.via.startswith("local-fallback(")
+    assert plan.actions[0].action == "open_app"

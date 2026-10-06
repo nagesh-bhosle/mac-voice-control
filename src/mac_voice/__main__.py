@@ -27,7 +27,7 @@ from mac_voice.ui import feedback
 @click.option("--ptt", is_flag=True, default=False, help="Push-to-talk listening mode (macOS only).")
 @click.option("--wake", is_flag=True, default=False, help="Wake-word listening mode (macOS only).")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Print the plan (dry-run) or results as JSON.")
-@click.option("--use-jev", is_flag=True, default=False, help="Route via the TypeSafe Jev API (needs TYPESAFE_API_KEY).")
+@click.option("--use-jev", is_flag=True, default=False, help="Route via Command Code Jev typesafe/jev (needs COMMAND_CODE_API_KEY).")
 @click.option("--use-llm", is_flag=True, default=False, help="Route via Command Code LLM (needs COMMAND_CODE_API_KEY).")
 @click.option(
     "--model",
@@ -57,6 +57,7 @@ def main(text, dry_run, hold, ptt, wake, as_json, use_jev, use_llm, model, stt_c
     if model:
         settings.llm_model = model.strip()
     use_llm = use_llm or settings.llm_enabled
+    use_jev = use_jev or settings.jev_enabled
 
     utterance = (text or "").strip()
     if audio_path:
@@ -70,10 +71,8 @@ def main(text, dry_run, hold, ptt, wake, as_json, use_jev, use_llm, model, stt_c
             'nothing to route: pass --text "utterance", --audio PATH, or use a listening mode on macOS'
         )
 
-    if use_llm and not settings.command_code_api_key:
+    if (use_llm or use_jev) and not settings.command_code_api_key:
         print("COMMAND_CODE_API_KEY is not set; falling back to the local router.")
-    if use_jev and not settings.typesafe_api_key:
-        print("TYPESAFE_API_KEY is not set; falling back to the local router.")
 
     plan = route_utterance(utterance, settings, use_jev=use_jev, use_llm=use_llm)
 

@@ -1,4 +1,4 @@
-"""Command Code Provider API client (OpenAI-compatible chat completions)."""
+"""Command Code Provider API client (chat completions + Jev systemone)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from typing import Any
 import httpx
 
 from mac_voice.brain import candidates as C
-from mac_voice.config import DEFAULT_LLM_MODEL
+from mac_voice.config import DEFAULT_LLM_MODEL, JEV_MODEL
 
 COMMAND_CODE_CHAT_URL = "https://api.commandcode.ai/provider/v1/chat/completions"
+COMMAND_CODE_SYSTEMONE_URL = "https://api.commandcode.ai/provider/v1/systemone"
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
@@ -21,7 +22,7 @@ class CommandCodeError(RuntimeError):
 
 
 class CommandCodeClient:
-    """Thin chat-completions client for Command Code Provider API."""
+    """Thin client for Command Code Provider API (chat + Jev systemone)."""
 
     def __init__(
         self,
@@ -29,11 +30,13 @@ class CommandCodeClient:
         model: str = DEFAULT_LLM_MODEL,
         timeout: float = 45.0,
         base_url: str = COMMAND_CODE_CHAT_URL,
+        systemone_url: str = COMMAND_CODE_SYSTEMONE_URL,
     ) -> None:
         self.api_key = (api_key or "").strip()
         self.model = model or DEFAULT_LLM_MODEL
         self.timeout = timeout
         self.base_url = base_url
+        self.systemone_url = systemone_url
 
     def require_key(self) -> None:
         if not self.api_key:
@@ -72,6 +75,51 @@ class CommandCodeClient:
             return (data["choices"][0]["message"]["content"] or "").strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise CommandCodeError(f"Unexpected Command Code response shape: {data!r}") from exc
+
+    def systemone(
+        self,
+        state: Any,
+        questions: dict[str, Any],
+        *,
+        model: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Call Jev via Provider API systemone. Returns the full JSON body."""
+        self.require_key()
+        payload = {
+            "model": model or JEV_MODEL,
+            "state": state,
+            "questions": questions,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        resp = httpx.post(
+            self.systemone_url,
+            headers=headers,
+            json=payload,
+            timeout=timeout if timeout is not None else self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise CommandCodeError(f"Unexpected systemone response shape: {data!r}")
+        return data
+
+    def jev_decide(
+        self,
+        state: Any,
+        questions: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Convenience: POST typesafe/jev and return the answers map."""
+        data = self.systemone(state, questions, model=JEV_MODEL, timeout=timeout)
+        answers = data.get("answers")
+        if not isinstance(answers, dict):
+            raise CommandCodeError(f"Jev response missing answers: {data!r}")
+        return answers
 
     def normalize_code_dictation(self, transcript: str) -> str:
         """Turn spoken code into exact typed text. Returns empty string on blank input."""
@@ -190,7 +238,7 @@ def _args_ok(action: str, args: dict[str, Any]) -> bool:
     if action == "code_snippet":
         return "name" in args
     if action == "dictate":
-        return True  # text may be empty; still a valid no-op dictate
+        return True
     if action == "say":
         return "text" in args
     return True
@@ -248,5 +296,4 @@ def _sanitize_args(action: str, args: dict[str, Any]) -> dict[str, Any]:
         text = args.get("text")
         if isinstance(text, str):
             out["text"] = text
-    # volume_*/mute/screenshot/tab actions take no free-form args
     return out

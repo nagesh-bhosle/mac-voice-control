@@ -18,7 +18,7 @@ shell.
 - Optional keys (see Environment below):
   - `DEEPGRAM_API_KEY` for cloud STT
   - `COMMAND_CODE_API_KEY` (or `CMD_API_KEY`) for Muse / DeepSeek / free models
-  - `TYPESAFE_API_KEY` for TypeSafe Jev API routing
+    **and** for Jev (`typesafe/jev`) via `--use-jev`
 
 ## Setup
 
@@ -52,11 +52,12 @@ Keyboard Shortcuts > Modifier Keys, or see the `hidutil` hint printed by
 | Variable | Purpose |
 |----------|---------|
 | `DEEPGRAM_API_KEY` | Preferred STT when set (`MAC_VOICE_STT=auto`). |
-| `COMMAND_CODE_API_KEY` / `CMD_API_KEY` | Command Code Provider API for `--use-llm` and code dictation normalize. |
-| `MAC_VOICE_MODEL` | LLM model id. Default `meta/muse-spark-1.3-contributor`. |
+| `COMMAND_CODE_API_KEY` / `CMD_API_KEY` | Command Code Provider API for `--use-llm`, `--use-jev` (`typesafe/jev`), and code dictation. |
+| `MAC_VOICE_MODEL` | LLM model id for `--use-llm`. Default `meta/muse-spark-1.3-contributor`. |
 | `MAC_VOICE_STT` | `auto` (default), `deepgram`, or `whisper`. |
 | `MAC_VOICE_USE_LLM` | Set to `1` to enable LLM routing by default. |
-| `TYPESAFE_API_KEY` | Optional. Enables `--use-jev` API routing. Local router is the default. |
+| `MAC_VOICE_USE_JEV` | Set to `1` to enable Command Code Jev routing by default. |
+| `TYPESAFE_API_KEY` | Legacy only; unused for `--use-jev` when a Command Code key is set. |
 | `MUSE_API_KEY` | Optional legacy Anthropic key for dictation only (Command Code preferred). |
 | `OPENAI_API_KEY` | Optional, reserved. |
 | `MAC_VOICE_WAKE_WORD` | Wake word, default `Alfred`. |
@@ -72,8 +73,11 @@ Keyboard Shortcuts > Modifier Keys, or see the `hidutil` hint printed by
 | `poolside/laguna-s-2.1-free` | Free model |
 | `inclusionai/ling-3.1-flash:free` | Free model |
 
-Endpoint used: `https://api.commandcode.ai/provider/v1/chat/completions`
-with `Authorization: Bearer $COMMAND_CODE_API_KEY`.
+Endpoints (Bearer `COMMAND_CODE_API_KEY` / `CMD_API_KEY`):
+
+- Chat / Muse: `https://api.commandcode.ai/provider/v1/chat/completions`
+- Jev (`typesafe/jev`): `https://api.commandcode.ai/provider/v1/systemone`
+  ([model page](https://commandcode.ai/models/jev))
 
 Secrets live in `.env` only and are never logged or committed.
 
@@ -92,8 +96,7 @@ On a Mac, after setup and permissions:
 1. Load `.env` if present (creates it from `.env.example` when missing).
 2. Interactively prompt (input hidden) for empty keys:
    - `DEEPGRAM_API_KEY` — Enter skips (Whisper / `--text` still work)
-   - `COMMAND_CODE_API_KEY` — Enter skips (no Muse / `--use-llm`)
-   - `TYPESAFE_API_KEY` — Enter skips (local router is default)
+   - `COMMAND_CODE_API_KEY` — Enter skips (local router; needed for Muse / `--use-llm` / `--use-jev`)
 3. Write any new keys into `.env` with `chmod 600` (never printed or committed).
 4. Run `uv sync` if needed, then start hold-to-talk in the background
    (`uv run python -m mac_voice --hold`, looped so it keeps listening).
@@ -143,7 +146,7 @@ mac-voice --text "..." --dry-run        # route only, safe anywhere
 mac-voice --text "..." --dry-run --json # machine readable plan
 mac-voice --text "..."                  # execute on macOS
 mac-voice --text "..." --yes            # also allow destructive actions
-mac-voice --text "..." --use-jev        # route via TypeSafe Jev API
+mac-voice --text "..." --use-jev        # route via Command Code Jev (typesafe/jev)
 mac-voice --text "..." --use-llm        # route via Command Code LLM
 mac-voice --model <id>                  # override MAC_VOICE_MODEL
 mac-voice --stt auto|deepgram|whisper   # STT provider
@@ -212,8 +215,7 @@ See `src/mac_voice/exec/editor.py` for the key maps.
 | Live run on Linux errors asking for `--dry-run` | Same: execution needs Darwin. Add `--dry-run`. |
 | Nothing happens on macOS live run | Check Accessibility and Input Monitoring grants, then restart the terminal. |
 | Mic never hears anything | Check Microphone grant for the terminal app. |
-| `COMMAND_CODE_API_KEY is not set; falling back` | Set it (or `CMD_API_KEY`) in `.env`, or drop `--use-llm`. |
-| `TYPESAFE_API_KEY is not set; falling back` | Set it in `.env` or drop `--use-jev` to use the local router. |
+| `COMMAND_CODE_API_KEY is not set; falling back` | Set it (or `CMD_API_KEY`) in `.env`, or drop `--use-llm` / `--use-jev`. |
 | `DEEPGRAM_API_KEY is not set` | Add it to `.env`, or use `--stt whisper` / `--text`. |
 | `Unknown app` / `Unknown editor command` | The name is outside the closed set. Check `candidates.py` for supported names. |
 | Whisper missing | Re-run `./scripts/setup.sh` for the brew and pip hints. |
@@ -225,8 +227,8 @@ uv sync --extra dev
 uv run pytest -q
 ```
 
-Tests cover routing, slot extraction, Command Code / Deepgram clients
-(mocked HTTP), and LLM JSON validation. They pass on Linux without mic
+Tests cover routing, slot extraction, Command Code chat + Jev systemone /
+Deepgram clients (mocked HTTP), and LLM JSON validation. They pass on Linux without mic
 or AX hardware.
 
 ## License
