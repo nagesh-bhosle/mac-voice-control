@@ -20,6 +20,8 @@ def dispatch_action(
     action: Action | dict[str, Any],
     dry_run: bool = False,
     muse_api_key: str = "",
+    command_code_api_key: str = "",
+    llm_model: str = "",
 ) -> str:
     if isinstance(action, Action):
         name = action.action
@@ -72,7 +74,12 @@ def dispatch_action(
     if name == "focus_editor":
         return editor.focus_editor(args["app"], dry_run=dry_run)
     if name == "dictate":
-        text = muse_normalize.normalize(args.get("text", ""), muse_api_key)
+        text = muse_normalize.normalize(
+            args.get("text", ""),
+            muse_api_key=muse_api_key,
+            command_code_api_key=command_code_api_key,
+            model=llm_model,
+        )
         return editor.dictate(text, dry_run=dry_run)
     if name == "editor_command":
         return editor.editor_command(
@@ -82,7 +89,16 @@ def dispatch_action(
         )
     if name == "code_snippet":
         template = args.get("template", "")
-        text = muse_normalize.normalize(template, muse_api_key) if template else ""
+        text = (
+            muse_normalize.normalize(
+                template,
+                muse_api_key=muse_api_key,
+                command_code_api_key=command_code_api_key,
+                model=llm_model,
+            )
+            if template
+            else ""
+        )
         return editor.dictate(text, dry_run=dry_run)
 
     if name == "volume_up":
@@ -117,12 +133,20 @@ def dispatch_many(
     actions: list[Action | dict[str, Any]],
     dry_run: bool = False,
     muse_api_key: str = "",
+    command_code_api_key: str = "",
+    llm_model: str = "",
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for action in actions:
         name = action.action if isinstance(action, Action) else action.get("action", "")
         try:
-            result = dispatch_action(action, dry_run=dry_run, muse_api_key=muse_api_key)
+            result = dispatch_action(
+                action,
+                dry_run=dry_run,
+                muse_api_key=muse_api_key,
+                command_code_api_key=command_code_api_key,
+                llm_model=llm_model,
+            )
             results.append({"action": name, "ok": True, "result": result})
         except Exception as exc:
             results.append({"action": name, "ok": False, "error": str(exc)})

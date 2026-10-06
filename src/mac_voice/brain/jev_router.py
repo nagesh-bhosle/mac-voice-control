@@ -1,9 +1,11 @@
-"""Jev router: local heuristic routing (always offline) plus optional TypeSafe Jev API.
+"""Jev router: local heuristic routing (always offline) plus optional TypeSafe Jev API
+and optional Command Code LLM routing constrained to the closed action catalog.
 
 The local router is the primary path for --dry-run and tests. When
-TYPESAFE_API_KEY is set and --no-local is passed, the router calls the
-TypeSafe Jev API with Choice questions built from the closed catalogs
-and falls back to the local heuristic if the API fails.
+TYPESAFE_API_KEY is set and --use-jev is passed, the router calls the
+TypeSafe Jev API. When --use-llm (or MAC_VOICE_USE_LLM) and a Command Code
+key are set, the router asks the LLM for a JSON ActionPlan, validates it
+against brain/candidates.py, and falls back to the local heuristic on failure.
 
 The closed action set in brain/candidates.py is the only source of
 actions. Model output is never executed as shell.
@@ -11,7 +13,6 @@ actions. Model output is never executed as shell.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -304,8 +305,57 @@ def plan_from_jev_payload(utterance: str, data: dict[str, Any]) -> ActionPlan:
     return ActionPlan(utterance=utterance, actions=actions, via="jev")
 
 
-def route_utterance(utterance: str, settings: Settings | None = None, use_jev: bool = False) -> ActionPlan:
+def plan_from_llm_payload(utterance: str, data: dict[str, Any]) -> ActionPlan:
+    """Build an ActionPlan from LLM JSON after closed-catalog validation."""
+    from mac_voice.llm.command_code import validate_llm_actions
+
+    cleaned = validate_llm_actions(data)
+    actions = [
+        Action(
+            action=item["action"],
+            args=item.get("args", {}),
+            confirm=_confirm_for(item["action"]),
+            text=utterance.strip(),
+        )
+        for item in cleaned
+    ]
+    if not actions:
+        plan = route_local(utterance)
+        plan.via = "local-fallback(llm-empty)"
+        return plan
+    return ActionPlan(utterance=utterance, actions=actions, via="llm")
+
+
+def route_via_llm(utterance: str, settings: Settings) -> ActionPlan:
+    """Ask Command Code for a JSON ActionPlan; validate; fall back to local."""
+    if not settings.command_code_api_key:
+        plan = route_local(utterance)
+        plan.via = "local-fallback(no-command-code-key)"
+        return plan
+    try:
+        from mac_voice.llm.command_code import CommandCodeClient
+
+        client = CommandCodeClient(
+            api_key=settings.command_code_api_key,
+            model=settings.llm_model,
+        )
+        data = client.route_to_action_plan_json(utterance)
+        return plan_from_llm_payload(utterance, data)
+    except Exception as exc:
+        plan = route_local(utterance)
+        plan.via = f"local-fallback({type(exc).__name__})"
+        return plan
+
+
+def route_utterance(
+    utterance: str,
+    settings: Settings | None = None,
+    use_jev: bool = False,
+    use_llm: bool = False,
+) -> ActionPlan:
     settings = settings or Settings()
+    if use_llm and settings.command_code_api_key:
+        return route_via_llm(utterance, settings)
     if use_jev and settings.typesafe_api_key:
         return route_via_jev(utterance, settings)
     return route_local(utterance)

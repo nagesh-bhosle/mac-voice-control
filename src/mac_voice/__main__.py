@@ -14,8 +14,9 @@ import sys
 import click
 
 from mac_voice.brain.jev_router import route_utterance
-from mac_voice.config import load_settings
+from mac_voice.config import DEFAULT_LLM_MODEL, load_settings
 from mac_voice.exec import dispatcher
+from mac_voice.stt import resolve_stt_provider, transcribe_audio
 from mac_voice.ui import feedback
 
 
@@ -27,8 +28,22 @@ from mac_voice.ui import feedback
 @click.option("--wake", is_flag=True, default=False, help="Wake-word listening mode (macOS only).")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Print the plan (dry-run) or results as JSON.")
 @click.option("--use-jev", is_flag=True, default=False, help="Route via the TypeSafe Jev API (needs TYPESAFE_API_KEY).")
+@click.option("--use-llm", is_flag=True, default=False, help="Route via Command Code LLM (needs COMMAND_CODE_API_KEY).")
+@click.option(
+    "--model",
+    default="",
+    help=f"Command Code model id (default: {DEFAULT_LLM_MODEL} or MAC_VOICE_MODEL).",
+)
+@click.option(
+    "--stt",
+    "stt_choice",
+    type=click.Choice(["auto", "deepgram", "whisper"], case_sensitive=False),
+    default=None,
+    help="Speech-to-text provider (default: MAC_VOICE_STT or auto).",
+)
+@click.option("--audio", "audio_path", default="", help="Transcribe this audio file instead of --text / mic.")
 @click.option("--yes", is_flag=True, default=False, help="Allow destructive actions (quit_app, close_window, close_tab).")
-def main(text, dry_run, hold, ptt, wake, as_json, use_jev, yes):
+def main(text, dry_run, hold, ptt, wake, as_json, use_jev, use_llm, model, stt_choice, audio_path, yes):
     """Route a voice utterance to a typed action plan and execute it."""
     if hold or ptt or wake:
         if platform.system() != "Darwin":
@@ -37,18 +52,30 @@ def main(text, dry_run, hold, ptt, wake, as_json, use_jev, yes):
 
     settings = load_settings()
     dry_run = dry_run or settings.dry_run
+    if stt_choice:
+        settings.stt_provider = stt_choice.lower()
+    if model:
+        settings.llm_model = model.strip()
+    use_llm = use_llm or settings.llm_enabled
 
     utterance = (text or "").strip()
-    if not utterance and (hold or ptt or wake):
+    if audio_path:
+        utterance = transcribe_audio(audio_path, settings)
+        feedback.status(f"STT ({resolve_stt_provider(settings)}): {utterance!r}")
+    elif not utterance and (hold or ptt or wake):
         mode = "hold" if hold else ("ptt" if ptt else "wake")
-        utterance = _listen_once(mode)
+        utterance = _listen_once(mode, settings)
     if not utterance:
-        raise click.UsageError('nothing to route: pass --text "utterance" or use a listening mode on macOS')
+        raise click.UsageError(
+            'nothing to route: pass --text "utterance", --audio PATH, or use a listening mode on macOS'
+        )
 
+    if use_llm and not settings.command_code_api_key:
+        print("COMMAND_CODE_API_KEY is not set; falling back to the local router.")
     if use_jev and not settings.typesafe_api_key:
         print("TYPESAFE_API_KEY is not set; falling back to the local router.")
 
-    plan = route_utterance(utterance, settings, use_jev=use_jev)
+    plan = route_utterance(utterance, settings, use_jev=use_jev, use_llm=use_llm)
 
     if dry_run:
         if as_json:
@@ -74,7 +101,13 @@ def main(text, dry_run, hold, ptt, wake, as_json, use_jev, yes):
         print("nothing to execute")
         return
 
-    results = dispatcher.dispatch_many(actions, dry_run=False, muse_api_key=settings.muse_api_key)
+    results = dispatcher.dispatch_many(
+        actions,
+        dry_run=False,
+        muse_api_key=settings.muse_api_key,
+        command_code_api_key=settings.command_code_api_key,
+        llm_model=settings.llm_model,
+    )
     if as_json:
         print(json.dumps(results, indent=2))
     else:
@@ -85,9 +118,15 @@ def main(text, dry_run, hold, ptt, wake, as_json, use_jev, yes):
                 print(f"failed: {res['action']}: {res['error']}")
 
 
-def _listen_once(mode: str) -> str:
-    feedback.status(f"{mode} mode: live mic capture is not wired in this MVP.")
-    feedback.status('Type the utterance and press Enter (empty line aborts), or use --text "...".')
+def _listen_once(mode: str, settings) -> str:
+    provider = resolve_stt_provider(settings)
+    feedback.status(f"{mode} mode: STT provider={provider}.")
+    if provider == "deepgram":
+        feedback.status("Deepgram key detected; live mic capture still MVP-stubbed.")
+        feedback.status("Pass --audio PATH to transcribe a file with Deepgram, or type below.")
+    else:
+        feedback.status("live mic capture is not wired in this MVP; type the utterance.")
+    feedback.status('Type the utterance and press Enter (empty line aborts), or use --text / --audio.')
     try:
         return input("> ").strip()
     except (EOFError, KeyboardInterrupt):
